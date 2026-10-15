@@ -1,2 +1,1 @@
-# kaira
-A project on software (Syber security)
+﻿# Kaira - AI-Powered Security Auditor
