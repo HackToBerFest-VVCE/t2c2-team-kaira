@@ -1,0 +1,160 @@
+name: Kaira Security Gate
+
+on:
+  pull_request:
+    branches: [main]
+  push:
+    branches: [main]
+
+permissions:
+  contents: read
+
+jobs:
+  required-checks:
+    name: Kaira Required Checks
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+    permissions:
+      contents: read
+    steps:
+      - name: Check out source
+        id: checkout
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          fetch-depth: 0
+          persist-credentials: false
+
+      - name: Scan for secrets with Gitleaks
+        id: gitleaks
+        if: ${{ always() && steps.checkout.outcome == 'success' }}
+        run: >-
+          docker run --rm
+          --volume "$GITHUB_WORKSPACE:/repo:ro"
+          ghcr.io/gitleaks/gitleaks:v8.30.1
+          git --redact --no-banner /repo
+
+      - name: Set up Python for Semgrep
+        id: setup-python
+        if: ${{ always() && steps.checkout.outcome == 'success' }}
+        uses: actions/setup-python@5fda3b95a4ea91299a34e894583c3862153e4b97 # v7.0.0
+        with:
+          python-version: "3.12"
+
+      - name: Install pinned Semgrep
+        id: install-semgrep
+        if: ${{ always() && steps.setup-python.outcome == 'success' }}
+        run: python -m pip install --disable-pip-version-check "semgrep==1.181.0"
+
+      - name: Run Semgrep security rules
+        id: semgrep
+        if: ${{ always() && steps.install-semgrep.outcome == 'success' }}
+        run: >-
+          semgrep scan --config p/security-audit --error --metrics=off
+          --quiet --json --output semgrep-results.json .
+
+      - name: Set up Node.js
+        id: setup-node
+        if: ${{ always() && steps.checkout.outcome == 'success' }}
+        uses: actions/setup-node@949feb2413d6458794dcd2491c4babbbce0c15c1 # v7.1.0
+        with:
+          node-version: 24
+          cache: npm
+
+      - name: Install locked dependencies
+        id: install
+        if: ${{ always() && steps.setup-node.outcome == 'success' }}
+        run: npm ci
+
+      - name: Audit production dependencies
+        id: production-dependency-audit
+        if: ${{ always() && steps.install.outcome == 'success' }}
+        run: npm audit --omit=dev --audit-level=high --json | tee production-audit.json
+
+      - name: Audit all dependencies (including development)
+        id: all-dependencies-audit
+        if: ${{ always() && steps.install.outcome == 'success' }}
+        run: npm audit --audit-level=high --json | tee all-dependencies-audit.json
+
+      - name: Report development-only high-severity findings
+        id: development-audit-report
+        if: ${{ always() && steps.install.outcome == 'success' }}
+        run: |
+          node <<'NODE'
+          const fs = require('node:fs');
+
+          const production = JSON.parse(fs.readFileSync('production-audit.json', 'utf8'));
+          const all = JSON.parse(fs.readFileSync('all-dependencies-audit.json', 'utf8'));
+          const productionPackages = new Set(Object.keys(production.vulnerabilities ?? {}));
+          const allHigh = Object.entries(all.vulnerabilities ?? {})
+            .filter(([, issue]) => issue.severity === 'high');
+          const productionHigh = allHigh.filter(([name]) => productionPackages.has(name));
+          const developmentOnlyHigh = allHigh.filter(([name]) => !productionPackages.has(name));
+
+          function printFindings(title, findings) {
+            console.log(`${title}: ${findings.length}`);
+            for (const [name, issue] of findings) {
+              console.log(`- ${name} ${issue.range}; nodes: ${(issue.nodes ?? []).join(', ')}`);
+              for (const advisory of issue.via ?? []) {
+                if (typeof advisory !== 'string') {
+                  console.log(`  ${advisory.title} ${advisory.url}`);
+                }
+              }
+            }
+          }
+
+          console.log(`Production audit totals: ${JSON.stringify(production.metadata?.vulnerabilities ?? {})}`);
+          printFindings('High-severity production findings', productionHigh);
+          printFindings('High-severity development-only findings', developmentOnlyHigh);
+          console.log(`Full audit totals: ${JSON.stringify(all.metadata?.vulnerabilities ?? {})}`);
+          NODE
+
+      - name: Run tests
+        id: tests
+        if: ${{ always() && steps.install.outcome == 'success' }}
+        run: npm test
+
+      - name: Type-check
+        id: typecheck
+        if: ${{ always() && steps.install.outcome == 'success' }}
+        run: npx --no-install tsc --noEmit
+
+      - name: Lint
+        id: lint
+        if: ${{ always() && steps.install.outcome == 'success' }}
+        run: npm run lint
+
+      - name: Build
+        id: build
+        if: ${{ always() && steps.install.outcome == 'success' }}
+        run: npm run build
+
+      - name: Enforce required checks
+        if: always()
+        env:
+          CHECKOUT_RESULT: ${{ steps.checkout.outcome }}
+          GITLEAKS_RESULT: ${{ steps.gitleaks.outcome }}
+          PYTHON_RESULT: ${{ steps.setup-python.outcome }}
+          SEMGREP_INSTALL_RESULT: ${{ steps.install-semgrep.outcome }}
+          SEMGREP_RESULT: ${{ steps.semgrep.outcome }}
+          NODE_RESULT: ${{ steps.setup-node.outcome }}
+          INSTALL_RESULT: ${{ steps.install.outcome }}
+          PRODUCTION_DEPENDENCY_AUDIT_RESULT: ${{ steps.production-dependency-audit.outcome }}
+          ALL_DEPENDENCIES_AUDIT_RESULT: ${{ steps.all-dependencies-audit.outcome }}
+          DEVELOPMENT_AUDIT_REPORT_RESULT: ${{ steps.development-audit-report.outcome }}
+          TEST_RESULT: ${{ steps.tests.outcome }}
+          TYPECHECK_RESULT: ${{ steps.typecheck.outcome }}
+          LINT_RESULT: ${{ steps.lint.outcome }}
+          BUILD_RESULT: ${{ steps.build.outcome }}
+        run: |
+          failed=0
+          for check in \
+            CHECKOUT_RESULT GITLEAKS_RESULT PYTHON_RESULT SEMGREP_INSTALL_RESULT \
+            SEMGREP_RESULT NODE_RESULT INSTALL_RESULT PRODUCTION_DEPENDENCY_AUDIT_RESULT \
+            ALL_DEPENDENCIES_AUDIT_RESULT DEVELOPMENT_AUDIT_REPORT_RESULT \
+            TEST_RESULT TYPECHECK_RESULT LINT_RESULT BUILD_RESULT; do
+            if [ "${!check}" != "success" ]; then
+              echo "::error::$check did not pass (${!check})."
+              failed=1
+            fi
+          done
+          exit "$failed"
