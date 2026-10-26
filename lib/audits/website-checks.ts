@@ -33,7 +33,11 @@ function headerFinding(
   value: string | undefined,
   recommendation: string,
   severity: AuditSeverity,
-  options: { weak?: (value: string) => boolean; weakReason?: string } = {},
+  options: {
+    weak?: (value: string) => boolean;
+    weakReason?: string;
+    presenceOnly?: boolean;
+  } = {},
 ): AuditFinding {
   if (!value) {
     return {
@@ -55,7 +59,9 @@ function headerFinding(
     title,
     explanation: weak
       ? `${headerName} was present, but ${options.weakReason ?? "its value may provide weaker protection than intended"}.`
-      : `${headerName} was present in the final response. This check verifies presence and a basic value; it is not a complete policy review.`,
+      : options.presenceOnly
+        ? `${headerName} was present in the final response. This is a presence check only; the policy directives and their effectiveness are not evaluated.`
+        : `${headerName} was present in the final response. This check verifies presence and a basic value; it is not a complete policy review.`,
     evidence: `${headerName}: ${value.slice(0, 300)}`,
     recommendation,
   };
@@ -295,8 +301,9 @@ export function auditWebsiteResponse(response: WebsiteResponseForAudit): AuditFi
       "Browser feature policy",
       "Permissions-Policy",
       getHeader(response.headers, "permissions-policy"),
-      "Set a Permissions-Policy that disables browser features the site does not use.",
+      "Review whether a Permissions-Policy is appropriate and configure its directives for the browser features the site uses.",
       "low",
+      { presenceOnly: true },
     ),
     ...cookieFindings(response.headers),
   ];

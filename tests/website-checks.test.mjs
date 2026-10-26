@@ -42,6 +42,7 @@ test("checks common security headers and distinguishes missing from weak values"
   assert.equal(find(findings, "headers.frame-options").status, "pass");
   assert.equal(find(findings, "headers.referrer-policy").status, "fail");
   assert.equal(find(findings, "headers.permissions-policy").status, "fail");
+  assert.match(find(findings, "headers.permissions-policy").explanation, /not present/);
 
   for (const finding of findings) {
     assert.ok(finding.id);
@@ -51,6 +52,18 @@ test("checks common security headers and distinguishes missing from weak values"
     assert.ok(finding.evidence);
     assert.ok(finding.recommendation);
   }
+});
+
+test("describes Permissions-Policy as a presence-only check", () => {
+  const finding = find(
+    audit({ "permissions-policy": "camera=(), microphone=()" }),
+    "headers.permissions-policy",
+  );
+
+  assert.equal(finding.status, "pass");
+  assert.match(finding.explanation, /presence check only/i);
+  assert.match(finding.explanation, /directives and their effectiveness are not evaluated/i);
+  assert.doesNotMatch(finding.explanation, /the policy is secure/i);
 });
 
 test("marks HSTS not applicable when the final response is HTTP", () => {
@@ -68,16 +81,20 @@ test("marks HSTS not applicable when the final response is HTTP", () => {
 test("checks cookie flags without returning cookie values", () => {
   const findings = audit({
     "set-cookie": [
-      "sessionid=private-value; Path=/; HttpOnly; SameSite=Lax",
-      "theme=light; Path=/; Secure; SameSite=Strict",
+      "session=private-session; Path=/; Secure; HttpOnly; SameSite=Lax",
+      "client-visible=private-client; Path=/; Secure; SameSite=Strict",
+      "cross-site=private-cross-site; Path=/; HttpOnly; SameSite=None",
+      "legacy=private-legacy; Path=/; Secure; HttpOnly",
     ],
   });
 
   assert.equal(find(findings, "cookies.secure").status, "fail");
-  assert.match(find(findings, "cookies.secure").evidence, /sessionid/);
+  assert.equal(find(findings, "cookies.secure").evidence, "Cookies missing this flag: cross-site");
   assert.equal(find(findings, "cookies.httponly").status, "fail");
-  assert.equal(find(findings, "cookies.samesite").status, "pass");
-  assert.doesNotMatch(JSON.stringify(findings), /private-value/);
+  assert.equal(find(findings, "cookies.httponly").evidence, "Cookies missing this flag: client-visible");
+  assert.equal(find(findings, "cookies.samesite").status, "fail");
+  assert.equal(find(findings, "cookies.samesite").evidence, "Cookies needing review: cross-site, legacy");
+  assert.doesNotMatch(JSON.stringify(findings), /private-session|private-client|private-cross-site|private-legacy/);
   assert.match(find(findings, "cookies.httponly").explanation, /may be intentional/);
 });
 
