@@ -29,6 +29,7 @@ export interface SafeFetchOptions {
   timeoutMs?: number;
   maxResponseBytes?: number;
   maxRedirects?: number;
+  sameOriginRedirectsOnly?: boolean;
 }
 
 export interface SafeFetchResult {
@@ -36,6 +37,7 @@ export interface SafeFetchResult {
   statusCode: number;
   headers: IncomingHttpHeaders;
   body: Buffer;
+  redirectBlocked?: boolean;
 }
 
 export interface NodeRequestAdapters {
@@ -398,6 +400,7 @@ export function createSafeFetcher(options: SafeFetchOptions = {}) {
   const timeoutMs = options.timeoutMs ?? 5_000;
   const maxResponseBytes = options.maxResponseBytes ?? 1_048_576;
   const maxRedirects = options.maxRedirects ?? 3;
+  const sameOriginRedirectsOnly = options.sameOriginRedirectsOnly ?? false;
 
   if (!Number.isInteger(timeoutMs) || timeoutMs <= 0) {
     throw new RangeError("timeoutMs must be a positive integer.");
@@ -419,6 +422,7 @@ export function createSafeFetcher(options: SafeFetchOptions = {}) {
 
     try {
       let validated = await raceAbort(validatePublicUrl(input, resolveHost), controller.signal);
+      const requestOrigin = validated.url.origin;
       let redirectsFollowed = 0;
       const visited = new Set<string>();
 
@@ -436,6 +440,15 @@ export function createSafeFetcher(options: SafeFetchOptions = {}) {
 
         if (nextUrl) {
           response.cancel();
+          if (sameOriginRedirectsOnly && nextUrl.origin !== requestOrigin) {
+            return {
+              url: validated.url.href,
+              statusCode: response.statusCode,
+              headers: response.headers,
+              body: Buffer.alloc(0),
+              redirectBlocked: true,
+            };
+          }
           if (redirectsFollowed >= maxRedirects) {
             throw new UnsafeUrlError("The redirect limit was exceeded.");
           }

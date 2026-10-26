@@ -8,6 +8,7 @@ type FindingSeverity = "info" | "low" | "medium" | "high";
 
 interface AuditFinding {
   id: string;
+  pageUrl: string;
   severity: FindingSeverity;
   status: FindingStatus;
   title: string;
@@ -24,6 +25,11 @@ interface AuditResult {
   redirected: boolean;
   queryChanged: boolean;
   statusCode: number;
+  scanMode: string;
+  pageLimit: number;
+  pagesScanned: number;
+  pagesFailed: number;
+  pagesOmitted: number;
   scannedAt: string;
   findings: AuditFinding[];
 }
@@ -34,6 +40,11 @@ interface DependencyFinding {
   direct: boolean;
   affectedRange: string;
   fixAvailable: boolean;
+  fix: {
+    name?: string;
+    version?: string;
+    isSemVerMajor?: boolean;
+  } | null;
   advisory: { title?: string; url?: string }[];
 }
 
@@ -42,12 +53,50 @@ interface DependencyResult {
   scannedAt: string;
   summary: {
     total: number;
+    info: number;
     critical: number;
     high: number;
     moderate: number;
     low: number;
   };
   findings: DependencyFinding[];
+}
+
+interface SecretFinding {
+  type: string;
+  resource: string;
+  line: number;
+  severity: "critical" | "high" | "medium";
+}
+
+interface SecretCheck {
+  resource: string;
+  kind: "HTML" | "JavaScript";
+  status: "scanned" | "failed" | "skipped" | "omitted" | "external";
+  count?: number;
+  httpStatus?: number;
+  message?: string;
+}
+
+interface SecretScanResult {
+  scannedAt: string;
+  target: string;
+  pagesScanned: number;
+  pagesFailed: number;
+  resourcesScanned: number;
+  resourcesFailed: number;
+  resourcesSkipped: number;
+  resourcesOmitted: number;
+  resourcesExternal: number;
+  complete: boolean;
+  checks: SecretCheck[];
+  summary: {
+    total: number;
+    critical: number;
+    high: number;
+    medium: number;
+  };
+  findings: SecretFinding[];
 }
 
 
@@ -59,7 +108,7 @@ const weights: Record<FindingSeverity, number> = {
 };
 
 function scoreAudit(findings: AuditFinding[]) {
-  const applicable = findings.filter(
+  const applicable = uniqueRuleFindings(findings).filter(
     (f) => f.status !== "not_applicable",
   );
 
@@ -83,11 +132,28 @@ function grade(score: number) {
 function category(id: string) {
   if (id.startsWith("transport.")) return "Transport";
   if (id.startsWith("cookies.")) return "Cookies";
+  if (id.startsWith("response.")) return "Response";
+  if (id.startsWith("content.")) return "Page content";
   return "Headers";
 }
 
 function priority(severity: FindingSeverity) {
   return { high: 3, medium: 2, low: 1, info: 0 }[severity];
+}
+
+function uniqueRuleFindings(findings: AuditFinding[]) {
+  const rules = new Map<string, AuditFinding>();
+  for (const finding of findings) {
+    const existing = rules.get(finding.id);
+    if (!existing || (finding.status === "fail" && existing.status !== "fail")) {
+      rules.set(finding.id, finding);
+    }
+  }
+  return [...rules.values()];
+}
+
+function findingKey(finding: AuditFinding) {
+  return `${finding.id}:${finding.pageUrl}`;
 }
 
 function escapeCsv(value: string) {
@@ -106,6 +172,9 @@ const [dependencyScan, setDependencyScan] =
   useState<DependencyResult | null>(null);
 const [dependencyLoading, setDependencyLoading] = useState(false);
 const [dependencyError, setDependencyError] = useState("");
+const [secretScan, setSecretScan] = useState<SecretScanResult | null>(null);
+const [secretLoading, setSecretLoading] = useState(false);
+const [secretError, setSecretError] = useState("");
 
 
   async function handleSubmit(event: FormEvent<HTMLFormElement>) {
@@ -181,12 +250,48 @@ async function scanDependencies() {
   }
 }
 
+async function scanSecrets() {
+  setSecretLoading(true);
+  setSecretError("");
+
+  try {
+    if (!url.trim()) {
+      throw new Error("Enter the website URL above before scanning for exposed secrets.");
+    }
+
+    let normalizedUrl = url.trim();
+    if (!/^https?:\/\//i.test(normalizedUrl)) {
+      normalizedUrl = `https://${normalizedUrl}`;
+    }
+
+    const response = await fetch("/api/audits/secrets", {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ url: normalizedUrl }),
+    });
+    const payload = await response.json();
+
+    if (!response.ok) {
+      throw new Error(payload.error || "Secret scan failed.");
+    }
+
+    setSecretScan(payload as SecretScanResult);
+  } catch (err) {
+    setSecretError(
+      err instanceof Error ? err.message : "Secret scan failed.",
+    );
+  } finally {
+    setSecretLoading(false);
+  }
+}
+
 
   const findings = audit?.findings ?? [];
   const score = scoreAudit(findings);
-  const failed = findings.filter((f) => f.status === "fail");
-  const passed = findings.filter((f) => f.status === "pass");
-  const notApplicable = findings.filter(
+  const ruleFindings = uniqueRuleFindings(findings);
+  const failed = ruleFindings.filter((f) => f.status === "fail");
+  const passed = ruleFindings.filter((f) => f.status === "pass");
+  const notApplicable = ruleFindings.filter(
     (f) => f.status === "not_applicable",
   );
 
@@ -194,7 +299,7 @@ async function scanDependencies() {
     .sort((a, b) => priority(b.severity) - priority(a.severity))
     .slice(0, 3);
 
-  const groups = ["Transport", "Headers", "Cookies"];
+  const groups = ["Transport", "Response", "Page content", "Headers", "Cookies"];
 
   function downloadReport() {
     if (!audit) return;
@@ -256,6 +361,7 @@ async function scanDependencies() {
         <a className="vg-nav" href="#findings">⌕ Findings</a>
         <a className="vg-nav" href="#fixes">✳ Priority fixes</a>
         <a className="vg-nav" href="#dependencies">⬡ Dependencies</a>
+        <a className="vg-nav" href="#secrets">🔐 Secrets</a>
         <a className="vg-nav" href="#history">◷ Scan history</a>
 
         <div className="vg-sidebar-bottom">
@@ -281,7 +387,7 @@ async function scanDependencies() {
           <div>
             <div className="vg-eyebrow">NEW WEBSITE AUDIT</div>
             <h2>Scan your website</h2>
-            <p>Check HTTPS, browser security headers and cookie settings.</p>
+            <p>Fetches the live site and checks HTTP responses, page content, headers, and cookies.</p>
           </div>
 
           <form className="vg-scan-form" onSubmit={handleSubmit}>
@@ -316,7 +422,12 @@ async function scanDependencies() {
                 <div>
                   <div className="vg-eyebrow">LATEST SCAN</div>
                   <h2>{audit.target}</h2>
-                  <p>Scanned {new Date(audit.scannedAt).toLocaleString()}</p>
+                  <p>
+                    {audit.pagesScanned} page(s) scanned
+                    {audit.pagesFailed ? ` · ${audit.pagesFailed} same-origin page(s) could not be scanned` : ""}
+                    {audit.pagesOmitted ? ` · ${audit.pagesOmitted} additional page(s) omitted by the scan limit` : ""}
+                    {" · "}{new Date(audit.scannedAt).toLocaleString()}
+                  </p>
                 </div>
                 <button className="vg-secondary-button" onClick={downloadReport}>
                   ↓ Download report
@@ -325,7 +436,7 @@ async function scanDependencies() {
 
               <div className="vg-overview-grid">
                 <article className="vg-card vg-score-card">
-                  <div className="vg-card-label">CONFIGURATION SCORE</div>
+                  <div className="vg-card-label">VERIFIED CHECK SCORE</div>
                   <div
                     className={`vg-gauge ${score >= 80 ? "good" : score >= 60 ? "warn" : "bad"}`}
                     style={{ "--score": `${score * 3.6}deg` } as React.CSSProperties}
@@ -337,23 +448,23 @@ async function scanDependencies() {
                       <span>/ 100</span>
                     </div>
                   </div>
-                  <div className="vg-grade">GRADE {grade(score)}</div>
-                  <p>Weighted score based on failed applicable checks.</p>
+                  <div className="vg-grade">CHECK GRADE {grade(score)}</div>
+                  <p>Weighted only from observed applicable checks. This is not an overall security rating.</p>
                   <div className="vg-grade-scale">A: 90+ · B: 80+ · C: 70+ · D: 60+ · F: below 60</div>
                 </article>
 
                 <article className="vg-card vg-gate-card">
-                  <div className="vg-card-label">DEPLOYMENT GATE</div>
+                  <div className="vg-card-label">PASSIVE CHECK STATUS</div>
                   <div className={`vg-gate-status ${failed.length ? "blocked" : "approved"}`}>
                     <span>{failed.length ? "⊘" : "✓"}</span>
-                    <strong>{failed.length ? "BLOCKED" : "APPROVED"}</strong>
+                    <strong>{failed.length ? "REVIEW FINDINGS" : "NO FAILURES OBSERVED"}</strong>
                   </div>
                   <p>
                     {failed.length
-                      ? `${failed.length} failed check(s) need attention before approval.`
-                      : "No failed checks were found in this scan."}
+                      ? `${failed.length} observed check(s) failed.`
+                      : "No failures were observed in the checks completed by this scan."}
                   </p>
-                  <div className="vg-note">Website configuration scan only; this is not a source-code deployment verification.</div>
+                  <div className="vg-note">This is not deployment approval or a complete vulnerability assessment. Live, passive HTTP and page-content checks only; no login or exploit testing.</div>
                 </article>
 
                 <article className="vg-card vg-summary-card">
@@ -361,7 +472,8 @@ async function scanDependencies() {
                   <div className="vg-stat"><span className="vg-status-dot pass" /> Passed <strong>{passed.length}</strong></div>
                   <div className="vg-stat"><span className="vg-status-dot fail" /> Needs attention <strong>{failed.length}</strong></div>
                   <div className="vg-stat"><span className="vg-status-dot na" /> Not applicable <strong>{notApplicable.length}</strong></div>
-                  <div className="vg-stat"><span className="vg-status-dot info" /> Total checks <strong>{findings.length}</strong></div>
+                  <div className="vg-stat"><span className="vg-status-dot info" /> Total checks <strong>{ruleFindings.length}</strong></div>
+                  <div className="vg-stat"><span className="vg-status-dot info" /> Pages scanned <strong>{audit.pagesScanned}</strong></div>
                 </article>
               </div>
             </section>
@@ -440,7 +552,9 @@ async function scanDependencies() {
 
                 <p>
                   {finding.fixAvailable
-                    ? "A fix may be available. Review before updating."
+                    ? finding.fix?.version
+                      ? `Fix available: ${finding.fix.name || finding.package}@${finding.fix.version}${finding.fix.isSemVerMajor ? " (major update)" : ""}.`
+                      : "A fix may be available. Review before updating."
                     : "No automatic fix is indicated by the audit result."}
                 </p>
 
@@ -484,7 +598,6 @@ async function scanDependencies() {
   )}
 </section>
 
-
             <section id="fixes" className="vg-section">
               <div className="vg-section-heading">
                 <div>
@@ -527,20 +640,22 @@ async function scanDependencies() {
                   <div className="vg-finding-group" key={group}>
                     <h3>{group} <span>{groupFindings.length} checks</span></h3>
                     {groupFindings.map((finding) => (
-                      <article className="vg-finding" key={finding.id}>
+                      <article className="vg-finding" key={findingKey(finding)}>
                         <button
                           className="vg-finding-toggle"
-                          onClick={() => toggleFinding(finding.id)}
-                          aria-expanded={expanded.includes(finding.id)}
+                          onClick={() => toggleFinding(findingKey(finding))}
+                          aria-expanded={expanded.includes(findingKey(finding))}
                         >
                           <span className={`vg-status-dot ${finding.status === "pass" ? "pass" : finding.status === "fail" ? "fail" : "na"}`} />
                           <span className="vg-finding-title">{finding.title}</span>
                           <span className={`vg-severity ${finding.severity}`}>{finding.severity}</span>
                           <span className={`vg-status-pill ${finding.status}`}>{finding.status.replace("_", " ")}</span>
-                          <span className="vg-chevron">{expanded.includes(finding.id) ? "−" : "+"}</span>
+                          <span className="vg-chevron">{expanded.includes(findingKey(finding)) ? "−" : "+"}</span>
                         </button>
-                        {expanded.includes(finding.id) && (
+                        {expanded.includes(findingKey(finding)) && (
                           <div className="vg-finding-detail">
+                            <div className="vg-detail-label">SCANNED PAGE</div>
+                            <p>{new URL(finding.pageUrl).pathname}</p>
                             <p>{finding.explanation}</p>
                             <div className="vg-detail-label">EVIDENCE</div>
                             <pre>{finding.evidence}</pre>
@@ -592,17 +707,17 @@ async function scanDependencies() {
             <section className="vg-section">
               <div className="vg-section-heading">
                 <div>
-                  <div className="vg-eyebrow">AUTOMATION STATUS</div>
-                  <h2>AI fix & verify timeline</h2>
+                  <div className="vg-eyebrow">SCAN COVERAGE</div>
+                  <h2>What this run verified</h2>
                 </div>
-                <span className="vg-count">PLANNED</span>
+                <span className="vg-count">LIVE RESULTS</span>
               </div>
               <div className="vg-card vg-timeline">
                 {[
-                  ["01", "Finding detected", "Real scan results are available.", true],
-                  ["02", "Fix proposed", "AI patch generation is not connected yet.", false],
-                  ["03", "Tests executed", "Automated patch tests are not connected yet.", false],
-                  ["04", "Rescan verified", "Patch verification is not connected yet.", false],
+                  ["01", "Live pages scanned", `${audit.pagesScanned} page(s) scanned; ${audit.pagesFailed} failed; ${audit.pagesOmitted} omitted by scan limits.`, true],
+                  ["02", "Observed checks evaluated", `${findings.length} page-level results across ${ruleFindings.length} distinct checks.`, true],
+                  ["03", "Automated remediation", "Not performed by this passive scanner.", false],
+                  ["04", "Exploit verification", "Not performed; active testing is outside this scan.", false],
                 ].map(([number, title, description, complete]) => (
                   <div className="vg-timeline-step" key={String(number)}>
                     <span className={`vg-timeline-number ${complete ? "complete" : ""}`}>{complete ? "✓" : number}</span>
@@ -611,14 +726,112 @@ async function scanDependencies() {
                   </div>
                 ))}
               </div>
-              <p className="vg-footnote">This dashboard reports website response checks. It does not currently scan source files, apply code patches, or verify a deployment.</p>
+              <p className="vg-footnote">Results are limited to actual public HTTP responses received in this run and the checks listed above. They do not cover authenticated pages, backend source, or all vulnerability classes.</p>
             </section>
           </>
         )}
+
+        <section id="secrets" className="vg-section">
+          <div className="vg-section-heading">
+            <div>
+              <div className="vg-eyebrow">SECRET DETECTION</div>
+              <h2>Exposed credentials</h2>
+              <p>Inspect the submitted site’s publicly served HTML and same-origin JavaScript.</p>
+            </div>
+            <button
+              className="vg-secondary-button"
+              onClick={scanSecrets}
+              disabled={secretLoading}
+            >
+              {secretLoading ? "Scanning..." : "Scan for secrets"}
+            </button>
+          </div>
+
+          {secretError && <p className="vg-error" role="alert">{secretError}</p>}
+
+          {secretScan && (
+            <>
+              <div className="vg-overview-grid">
+                <article className="vg-card">
+                  <div className="vg-card-label">SECRETS FOUND</div>
+                  <h2>{secretScan.summary.total}</h2>
+                  <p>Pattern matches in publicly served site responses.</p>
+                </article>
+                <article className="vg-card">
+                  <div className="vg-card-label">CRITICAL / HIGH</div>
+                  <h2>{secretScan.summary.critical + secretScan.summary.high}</h2>
+                  <p>Findings requiring priority review.</p>
+                </article>
+                <article className="vg-card">
+                  <div className="vg-card-label">RESOURCE COVERAGE</div>
+                  <h2>{secretScan.resourcesScanned}</h2>
+                  <p>
+                    {secretScan.resourcesFailed} failed · {secretScan.resourcesSkipped} skipped
+                    <br />
+                    {secretScan.resourcesOmitted} omitted by limits
+                    <br />
+                    {secretScan.pagesScanned} HTML page(s) scanned
+                    {secretScan.resourcesExternal > 0
+                      ? ` · ${secretScan.resourcesExternal} external script(s) not fetched`
+                      : ""}
+                  </p>
+                </article>
+              </div>
+              <p className={secretScan.complete ? "vg-success-message" : "vg-error"} role={secretScan.complete ? undefined : "alert"}>
+                {secretScan.complete
+                  ? `All discovered same-origin resources within the scan limits were checked.${secretScan.resourcesExternal > 0 ? ` ${secretScan.resourcesExternal} external script(s) were excluded and not fetched.` : ""}`
+                  : `Scan incomplete: ${secretScan.resourcesFailed} resource(s) failed, ${secretScan.resourcesSkipped} were skipped, and ${secretScan.resourcesOmitted} were omitted by scan limits. ${secretScan.pagesFailed} HTML page(s) failed. Review resource statuses and reasons below.`}
+              </p>
+              <div className="vg-priority-list">
+                {secretScan.findings.length === 0 ? (
+                  <p className={secretScan.complete ? "vg-success-message" : "vg-note"}>
+                    {secretScan.complete
+                      ? "No matching exposed-secret patterns were detected in the resources that were scanned. This does not prove the site has no secrets."
+                      : "No matching exposed-secret patterns were detected in the resources scanned so far. This scan is incomplete and is not a clean result."}
+                  </p>
+                ) : (
+                  secretScan.findings.map((finding, index) => (
+                    <article className="vg-priority-item" key={`${finding.resource}:${finding.line}:${index}`}>
+                      <div className="vg-priority-content">
+                        <strong>{finding.type}</strong>
+                        <p>{finding.resource}:{finding.line}</p>
+                        <p>Matched pattern found in publicly served content. Secret value is withheld.</p>
+                      </div>
+                      <span className={`vg-severity ${finding.severity === "critical" || finding.severity === "high" ? "high" : "medium"}`}>
+                        {finding.severity}
+                      </span>
+                    </article>
+                  ))
+                )}
+              </div>
+              <div className="vg-priority-list">
+                {secretScan.checks.map((check, index) => (
+                  <article className="vg-priority-item" key={`${check.resource}:${check.kind}:${index}`}>
+                    <div className="vg-priority-content">
+                      <strong>{check.kind}: {check.resource}</strong>
+                      <p>
+                        {check.status}
+                        {check.count ? ` · ${check.count} resources` : ""}
+                        {check.httpStatus ? ` · HTTP ${check.httpStatus}` : ""}
+                        {check.message ? ` · ${check.message}` : ""}
+                      </p>
+                    </div>
+                    <span className={`vg-severity ${check.status === "scanned" ? "low" : "medium"}`}>
+                      {check.status}
+                    </span>
+                  </article>
+                ))}
+              </div>
+              <p className="vg-footnote">
+                Public responses only; server-side source, authenticated resources, and secrets not matching scanner patterns are not covered. Secret values are never included. Scanned{" "}
+                {new Date(secretScan.scannedAt).toLocaleString()}.
+              </p>
+            </>
+          )}
+        </section>
 
         <footer className="vg-footer">VIBE GUARD · TEAM KAIRA · SECURITY WITH CLARITY</footer>
       </section>
     </main>
   );
 }
-
