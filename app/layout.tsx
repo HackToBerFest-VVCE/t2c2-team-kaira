@@ -13,8 +13,8 @@ const geistMono = Geist_Mono({
 });
 
 export const metadata: Metadata = {
-  title: "Kaira | AI-Powered Security Auditor",
-  description: "AI-powered website security analysis and actionable remediation guidance.",
+  title: "Kaira | Website Security Audits",
+  description: "Review common website security configuration issues and get practical recommendations.",
 };
 
 export default function RootLayout({
