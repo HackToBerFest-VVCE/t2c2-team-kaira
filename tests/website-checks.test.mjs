@@ -26,6 +26,23 @@ test("reports HTTP use and a redirect that ends on HTTP", () => {
   assert.match(transport.evidence, /http:/);
 });
 
+test("reports the observed HTTP status and passive page-content risks", () => {
+  const findings = auditWebsiteResponse({
+    requestedUrl: "https://shop.example.testdomain.com",
+    finalUrl: "https://shop.example.testdomain.com",
+    statusCode: 404,
+    headers: {},
+    body: Buffer.from(
+      '<html><form action="http://forms.example.test/submit"></form>' +
+        '<script src="https://cdn.example.test/app.js"></script></html>',
+    ),
+  });
+
+  assert.equal(find(findings, "response.status").status, "fail");
+  assert.equal(find(findings, "content.insecure-form").status, "fail");
+  assert.equal(find(findings, "content.external-script-integrity").status, "fail");
+});
+
 test("checks common security headers and distinguishes missing from weak values", () => {
   const findings = audit({
     "content-security-policy": "default-src 'self'; script-src 'self' 'unsafe-inline'",

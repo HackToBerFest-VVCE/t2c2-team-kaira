@@ -18,6 +18,7 @@ export interface WebsiteResponseForAudit {
   finalUrl: string;
   statusCode: number;
   headers: IncomingHttpHeaders;
+  body?: Uint8Array;
 }
 
 function getHeader(headers: IncomingHttpHeaders, name: string): string | undefined {
@@ -212,6 +213,17 @@ export function auditWebsiteResponse(response: WebsiteResponseForAudit): AuditFi
   const hsts = getHeader(response.headers, "strict-transport-security");
   const findings: AuditFinding[] = [
     {
+      id: "response.status",
+      severity: response.statusCode >= 400 ? "medium" : "info",
+      status: response.statusCode >= 400 ? "fail" : "pass",
+      title: "HTTP response status",
+      explanation: response.statusCode >= 400
+        ? `The scanned page returned HTTP ${response.statusCode}. This confirms an unsuccessful response, not the cause or an exploitable vulnerability.`
+        : `The scanned page returned HTTP ${response.statusCode}.`,
+      evidence: `HTTP ${response.statusCode}`,
+      recommendation: "Review the response and ensure the requested page returns the intended status to visitors.",
+    },
+    {
       id: "transport.https",
       severity: isHttps ? "info" : "medium",
       status: isHttps ? "pass" : "fail",
@@ -307,6 +319,87 @@ export function auditWebsiteResponse(response: WebsiteResponseForAudit): AuditFi
     ),
     ...cookieFindings(response.headers),
   ];
+
+  if (response.body) {
+    findings.push(...auditPageContent(response.body, response.finalUrl));
+  }
+
+  return findings;
+}
+
+function auditPageContent(body: Uint8Array, pageUrl: string): AuditFinding[] {
+  const page = new URL(pageUrl);
+  const html = Buffer.from(body).toString("utf8");
+  const findings: AuditFinding[] = [];
+  const addFinding = (
+    id: string,
+    title: string,
+    severity: AuditSeverity,
+    problem: boolean,
+    evidence: string,
+    explanation: string,
+    recommendation: string,
+  ) => {
+    findings.push({
+      id,
+      severity: problem ? severity : "info",
+      status: problem ? "fail" : "pass",
+      title,
+      explanation,
+      evidence,
+      recommendation,
+    });
+  };
+
+  if (page.protocol === "https:") {
+    const insecureForm = /<form\b[^>]*\baction\s*=\s*(["'])\s*http:\/\/[^"']*\1/i
+      .test(html);
+    addFinding(
+      "content.insecure-form",
+      "Form transport",
+      "high",
+      insecureForm,
+      insecureForm ? "A form action uses HTTP." : "No HTTP form actions were found.",
+      insecureForm
+        ? "A form on an HTTPS page appears to submit data over HTTP."
+        : "No forms submitting directly over HTTP were found in the returned HTML.",
+      "Submit forms over HTTPS and validate sensitive actions server-side.",
+    );
+
+    const mixedResource = /<(?:script|img|iframe|audio|video|source|link)\b[^>]*\b(?:src|href)\s*=\s*(["'])\s*http:\/\/[^"']*\1/i
+      .test(html);
+    addFinding(
+      "content.mixed-content",
+      "Mixed-content resources",
+      "medium",
+      mixedResource,
+      mixedResource ? "An HTTP subresource was found in the HTML." : "No HTTP subresources were found.",
+      mixedResource
+        ? "The HTTPS page references at least one resource over HTTP; browsers may block it or load it without transport protection."
+        : "No HTTP script, image, frame, audio, video, or stylesheet references were found in the returned HTML.",
+      "Serve all page resources over HTTPS.",
+    );
+  }
+
+  const externalScriptWithoutIntegrity = [...html.matchAll(/<script\b([^>]*)\bsrc\s*=\s*(["'])(https?:\/\/[^"']+)\2([^>]*)>/gi)]
+    .some((match) => {
+      const scriptUrl = new URL(match[3]);
+      return scriptUrl.origin !== page.origin &&
+        !/\bintegrity\s*=/i.test(`${match[1]} ${match[4]}`);
+    });
+  addFinding(
+    "content.external-script-integrity",
+    "External script integrity",
+    "low",
+    externalScriptWithoutIntegrity,
+    externalScriptWithoutIntegrity
+      ? "An external script without an integrity attribute was found."
+      : "No external scripts without integrity metadata were found.",
+    externalScriptWithoutIntegrity
+      ? "The page loads at least one cross-origin script without Subresource Integrity metadata. This is a supply-chain hardening signal, not proof that the script is malicious."
+      : "No cross-origin script lacking integrity metadata was found in the returned HTML.",
+    "Use Subresource Integrity for stable third-party scripts where supported, or self-host the resource.",
+  );
 
   return findings;
 }

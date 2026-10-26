@@ -5,7 +5,7 @@ import {
   safeFetchPublicUrl,
   UnsafeUrlError,
 } from "./url-safety.ts";
-import { auditWebsiteResponse } from "./website-checks.ts";
+import { scanSameOriginPages } from "./website-crawl.ts";
 
 const MAX_REQUEST_BYTES = 4_096;
 const MAX_URL_LENGTH = 2_048;
@@ -257,12 +257,7 @@ export function createAuditPostHandler(
 
       const redirected = requestedUrl.href !== finalUrl.href;
 
-      const findings = auditWebsiteResponse({
-        requestedUrl: url,
-        finalUrl: result.url,
-        statusCode: result.statusCode,
-        headers: result.headers,
-      });
+      const scan = await scanSameOriginPages(url, result, fetchSafeUrl);
 
       return Response.json({
         target: new URL(url).origin,
@@ -272,8 +267,13 @@ export function createAuditPostHandler(
         redirected,
         queryChanged,
         statusCode: result.statusCode,
+        scanMode: "passive_http_same_origin",
+        pageLimit: 5,
+        pagesScanned: scan.pagesScanned,
+        pagesFailed: scan.pagesFailed,
+        pagesOmitted: scan.pagesOmitted,
         scannedAt: new Date().toISOString(),
-        findings,
+        findings: scan.findings,
       });
     } catch (error) {
       if (error instanceof UnsafeUrlError) {

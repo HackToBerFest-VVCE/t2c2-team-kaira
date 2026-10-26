@@ -93,6 +93,10 @@ test("POST validates the payload, calls safe fetch once, and returns structured 
   assert.equal(body.redirected, true);
   assert.equal(body.queryChanged, false);
   assert.equal(body.statusCode, 200);
+  assert.equal(body.scanMode, "passive_http_same_origin");
+  assert.equal(body.pageLimit, 5);
+  assert.equal(body.pagesScanned, 1);
+  assert.equal(body.pagesFailed, 0);
   assert.equal(typeof body.scannedAt, "string");
   assert.equal(
     body.findings.find(({ id }) => id === "transport.https").status,
@@ -440,6 +444,7 @@ test("rate limiting rejects excessive audit requests", async () => {
         url,
         statusCode: 200,
         headers: new Headers(),
+        body: Buffer.alloc(0),
       };
     },
     rateLimiter,
@@ -466,4 +471,3 @@ test("rate limiting rejects excessive audit requests", async () => {
   assert.equal(secondResponse.headers.get("retry-after"), "60");
   assert.equal(fetchCalls, 1);
 });
-
