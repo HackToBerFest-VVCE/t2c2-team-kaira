@@ -64,6 +64,10 @@ test("POST validates the payload, calls safe fetch once, and returns structured 
   assert.deepEqual(calls, ["https://shop.example.testdomain.com/start"]);
   assert.equal(body.target, "https://shop.example.testdomain.com");
   assert.equal(body.finalTarget, "https://shop.example.testdomain.com");
+  assert.equal(body.requestedUrl, "https://shop.example.testdomain.com/start");
+  assert.equal(body.finalUrl, "https://shop.example.testdomain.com/final");
+  assert.equal(body.redirected, true);
+  assert.equal(body.queryChanged, false);
   assert.equal(body.statusCode, 200);
   assert.equal(typeof body.scannedAt, "string");
   assert.equal(body.findings.find(({ id }) => id === "transport.https").status, "pass");
@@ -191,6 +195,52 @@ test("the route reports findings from the final response after a safe redirect",
   assert.equal(body.finalTarget, "https://final-kaira.testdomain.com");
   assert.equal(body.findings.find(({ id }) => id === "transport.https").status, "fail");
   assert.equal(body.findings.find(({ id }) => id === "headers.strict-transport-security").status, "pass");
+});
+
+test("the route reports same-origin path redirects without query values or fragments", async () => {
+  const safeFetch = createSafeFetcher({
+    resolveHost: async () => [{ address: "8.8.8.8", family: 4 }],
+    transport: async (url) =>
+      url.pathname === "/conversation"
+        ? transportResponse(302, { location: "/share/42?token=redirect-secret#final-fragment" })
+        : transportResponse(200),
+  });
+  const post = createAuditPostHandler(safeFetch);
+
+  const response = await post(request(JSON.stringify({
+    url: "https://same-origin-kaira.testdomain.com/conversation?token=request-secret#request-fragment",
+  })));
+  const body = await response.json();
+
+  assert.equal(response.status, 200);
+  assert.equal(body.requestedUrl, "https://same-origin-kaira.testdomain.com/conversation");
+  assert.equal(body.finalUrl, "https://same-origin-kaira.testdomain.com/share/42");
+  assert.equal(body.redirected, true);
+  assert.equal(body.queryChanged, true);
+  assert.doesNotMatch(JSON.stringify(body), /request-secret|redirect-secret|request-fragment|final-fragment/);
+});
+
+test("the route reports same-origin query redirects while hiding query values", async () => {
+  const safeFetch = createSafeFetcher({
+    resolveHost: async () => [{ address: "8.8.8.8", family: 4 }],
+    transport: async (url) =>
+      url.search === "?token=request-secret"
+        ? transportResponse(302, { location: "?token=redirect-secret" })
+        : transportResponse(200),
+  });
+  const post = createAuditPostHandler(safeFetch);
+
+  const response = await post(request(JSON.stringify({
+    url: "https://same-origin-kaira.testdomain.com/conversation?token=request-secret",
+  })));
+  const body = await response.json();
+
+  assert.equal(response.status, 200);
+  assert.equal(body.requestedUrl, "https://same-origin-kaira.testdomain.com/conversation");
+  assert.equal(body.finalUrl, "https://same-origin-kaira.testdomain.com/conversation");
+  assert.equal(body.redirected, true);
+  assert.equal(body.queryChanged, true);
+  assert.doesNotMatch(JSON.stringify(body), /request-secret|redirect-secret/);
 });
 
 test("the route maps a safe-fetch timeout to a generic gateway timeout", async () => {

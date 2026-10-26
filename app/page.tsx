@@ -19,6 +19,10 @@ interface AuditFinding {
 interface AuditResult {
   target: string;
   finalTarget: string;
+  requestedUrl: string;
+  finalUrl: string;
+  redirected: boolean;
+  queryChanged: boolean;
   statusCode: number;
   scannedAt: string;
   findings: AuditFinding[];
@@ -53,6 +57,10 @@ function isAuditResult(value: unknown): value is AuditResult {
     isRecord(value) &&
     typeof value.target === "string" &&
     typeof value.finalTarget === "string" &&
+    typeof value.requestedUrl === "string" &&
+    typeof value.finalUrl === "string" &&
+    typeof value.redirected === "boolean" &&
+    typeof value.queryChanged === "boolean" &&
     typeof value.statusCode === "number" &&
     typeof value.scannedAt === "string" &&
     Array.isArray(value.findings) &&
@@ -264,10 +272,11 @@ export default function Home() {
                 <p className="panel-kicker">Assessment complete</p>
                 <h2 id="results-title">Findings</h2>
                 <p className="results-target">
-                  {audit.target}
-                  {audit.finalTarget !== audit.target && (
-                    <span> redirected to {audit.finalTarget}</span>
-                  )}
+                  <strong>Requested URL:</strong> {audit.requestedUrl}
+                  <br />
+                  <strong>Final response URL:</strong> {audit.finalUrl}
+                  {audit.redirected && <span> (redirected)</span>}
+                  {audit.queryChanged && <span> Query parameters changed; values are hidden.</span>}
                 </p>
               </div>
               <p className="scan-time">

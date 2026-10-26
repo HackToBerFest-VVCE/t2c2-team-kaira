@@ -16,6 +16,13 @@ function errorResponse(status: number, code: string, message: string): Response 
   return Response.json({ error: { code, message } }, { status });
 }
 
+function reportUrl(input: string): URL {
+  const url = new URL(input);
+  url.search = "";
+  url.hash = "";
+  return url;
+}
+
 async function readRequestJson(request: Request): Promise<unknown> {
   const contentLength = request.headers.get("content-length");
   if (contentLength && Number(contentLength) > MAX_REQUEST_BYTES) {
@@ -81,6 +88,12 @@ export function createAuditPostHandler(fetchSafeUrl: typeof safeFetchPublicUrl =
 
     try {
       const result = await fetchSafeUrl(url);
+      const requestedUrl = new URL(url);
+      const finalUrl = new URL(result.url);
+      const queryChanged = requestedUrl.search !== finalUrl.search;
+      requestedUrl.hash = "";
+      finalUrl.hash = "";
+      const redirected = requestedUrl.href !== finalUrl.href;
       const findings = auditWebsiteResponse({
         requestedUrl: url,
         finalUrl: result.url,
@@ -91,6 +104,10 @@ export function createAuditPostHandler(fetchSafeUrl: typeof safeFetchPublicUrl =
       return Response.json({
         target: new URL(url).origin,
         finalTarget: new URL(result.url).origin,
+        requestedUrl: reportUrl(url).href,
+        finalUrl: reportUrl(result.url).href,
+        redirected,
+        queryChanged,
         statusCode: result.statusCode,
         scannedAt: new Date().toISOString(),
         findings,
