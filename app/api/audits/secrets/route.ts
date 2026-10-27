@@ -65,11 +65,15 @@ export async function POST(request: Request) {
     return NextResponse.json({
       scannedAt: new Date().toISOString(),
       ...result,
+      status: result.status ?? (result.complete ? "completed" : "partial"),
     });
   } catch (error) {
     if (error instanceof SecretScanError) {
       return NextResponse.json(
-        { error: error.message },
+        {
+          error: error.message,
+          status: error.status === 504 ? "timed_out" : "failed",
+        },
         { status: error.status },
       );
     }

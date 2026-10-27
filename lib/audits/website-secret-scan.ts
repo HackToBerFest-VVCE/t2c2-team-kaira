@@ -171,9 +171,17 @@ function displayResource(url: string) {
 }
 
 function safeScanError(error: unknown) {
-  if (error instanceof Error && error.name === "SafeFetchTimeoutError") {
+  if (
+    error instanceof Error &&
+    ["SafeFetchTimeoutError", "AbortError", "TimeoutError"].includes(error.name)
+  ) {
     return "The resource request timed out.";
   }
+
+  if (error instanceof Error && /timed out|timeout/i.test(error.message)) {
+    return "The resource request timed out.";
+  }
+
   return "The resource could not be fetched safely.";
 }
 
@@ -185,11 +193,12 @@ export async function scanWebsiteSecrets(
   try {
     initial = await fetchSafeUrl(input);
   } catch (error) {
+    const timedOut = safeScanError(error) === "The resource request timed out.";
     throw new SecretScanError(
       error instanceof Error && error.name === "UnsafeUrlError"
         ? "The target URL is invalid or not publicly reachable."
         : safeScanError(error),
-      error instanceof Error && error.name === "UnsafeUrlError" ? 400 : 502,
+      error instanceof Error && error.name === "UnsafeUrlError" ? 400 : timedOut ? 504 : 502,
     );
   }
 
@@ -472,6 +481,14 @@ export async function scanWebsiteSecrets(
   const resourcesFailed = countStatus("failed");
   const resourcesSkipped = countStatus("skipped");
   const resourcesOmitted = countStatus("omitted");
+  const timedOut = checks.some(
+    ({ status, message }) =>
+      status === "failed" && typeof message === "string" && /timed out|timeout/i.test(message),
+  );
+  const complete = resourcesFailed === 0 && resourcesSkipped === 0 &&
+    resourcesOmitted === 0 &&
+    htmlQueue.length === 0 && scriptQueue.length <= MAX_SCRIPT_FILES;
+
   return {
     target: new URL(initial.url).origin,
     pagesScanned,
@@ -482,9 +499,8 @@ export async function scanWebsiteSecrets(
     resourcesOmitted,
     resourcesExternal: externalScripts.size,
     checks,
-    complete: resourcesFailed === 0 && resourcesSkipped === 0 &&
-      resourcesOmitted === 0 &&
-      htmlQueue.length === 0 && scriptQueue.length <= MAX_SCRIPT_FILES,
+    complete,
+    status: timedOut ? "timed_out" : complete ? "completed" : "partial",
     findings,
     summary: {
       total: findings.length,

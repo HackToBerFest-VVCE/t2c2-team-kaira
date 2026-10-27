@@ -13,7 +13,7 @@ const geistMono = Geist_Mono({
 });
 
 export const metadata: Metadata = {
-  title: "Kaira | Website Security Audits",
+  title: "QUALYS | Website Security Audits",
   description: "Review common website security configuration issues and get practical recommendations.",
 };
 

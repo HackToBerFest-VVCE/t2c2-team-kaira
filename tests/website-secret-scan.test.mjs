@@ -204,6 +204,21 @@ test("reports timeouts without leaking transport errors or secret values", async
   assert.doesNotMatch(JSON.stringify(result), new RegExp(secret));
 });
 
+test("classifies a root resource timeout as a timed-out scan error", async () => {
+  const error = new Error("transport timeout");
+  error.name = "SafeFetchTimeoutError";
+  await assert.rejects(
+    scanWebsiteSecrets("https://site.example.testdomain.com/", async () => {
+      throw error;
+    }),
+    (scanError) => {
+      assert.equal(scanError.status, 504);
+      assert.equal(scanError.message, "The resource request timed out.");
+      return true;
+    },
+  );
+});
+
 test("blocks an external root redirect before requesting its destination", async () => {
   const root = "https://site.example.testdomain.com/";
   const requestedUrls = [];

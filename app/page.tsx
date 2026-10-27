@@ -2,6 +2,13 @@
 "use client";
 
 import { useState, type FormEvent } from "react";
+import { compareAuditFindings } from "../lib/audits/audit-comparison.ts";
+import {
+  calculateScanCoverage,
+  grade,
+  scoreAudit,
+  securityLevel,
+} from "../lib/audits/scanner-score.ts";
 
 type FindingStatus = "pass" | "fail" | "not_applicable";
 type FindingSeverity = "info" | "low" | "medium" | "high";
@@ -34,34 +41,6 @@ interface AuditResult {
   findings: AuditFinding[];
 }
 
-interface DependencyFinding {
-  package: string;
-  severity: string;
-  direct: boolean;
-  affectedRange: string;
-  fixAvailable: boolean;
-  fix: {
-    name?: string;
-    version?: string;
-    isSemVerMajor?: boolean;
-  } | null;
-  advisory: { title?: string; url?: string }[];
-}
-
-interface DependencyResult {
-  project: string;
-  scannedAt: string;
-  summary: {
-    total: number;
-    info: number;
-    critical: number;
-    high: number;
-    moderate: number;
-    low: number;
-  };
-  findings: DependencyFinding[];
-}
-
 interface SecretFinding {
   type: string;
   resource: string;
@@ -89,6 +68,7 @@ interface SecretScanResult {
   resourcesOmitted: number;
   resourcesExternal: number;
   complete: boolean;
+  status?: "completed" | "partial" | "timed_out";
   checks: SecretCheck[];
   summary: {
     total: number;
@@ -99,35 +79,6 @@ interface SecretScanResult {
   findings: SecretFinding[];
 }
 
-
-const weights: Record<FindingSeverity, number> = {
-  high: 20,
-  medium: 10,
-  low: 5,
-  info: 0,
-};
-
-function scoreAudit(findings: AuditFinding[]) {
-  const applicable = uniqueRuleFindings(findings).filter(
-    (f) => f.status !== "not_applicable",
-  );
-
-  const deductions = applicable.reduce(
-    (sum, f) =>
-      sum + (f.status === "fail" ? weights[f.severity] : 0),
-    0,
-  );
-
-  return Math.max(0, 100 - deductions);
-}
-
-function grade(score: number) {
-  if (score >= 90) return "A";
-  if (score >= 80) return "B";
-  if (score >= 70) return "C";
-  if (score >= 60) return "D";
-  return "F";
-}
 
 function category(id: string) {
   if (id.startsWith("transport.")) return "Transport";
@@ -168,10 +119,6 @@ export default function Home() {
   const [error, setError] = useState("");
   const [expanded, setExpanded] = useState<string[]>([]);
   
-const [dependencyScan, setDependencyScan] =
-  useState<DependencyResult | null>(null);
-const [dependencyLoading, setDependencyLoading] = useState(false);
-const [dependencyError, setDependencyError] = useState("");
 const [secretScan, setSecretScan] = useState<SecretScanResult | null>(null);
 const [secretLoading, setSecretLoading] = useState(false);
 const [secretError, setSecretError] = useState("");
@@ -223,33 +170,6 @@ const [secretError, setSecretError] = useState("");
     }
   }
   
-async function scanDependencies() {
-  setDependencyLoading(true);
-  setDependencyError("");
-
-  try {
-    const response = await fetch("/api/audits/dependencies", {
-      method: "POST",
-      headers: { "Content-Type": "application/json" },
-      body: JSON.stringify({}),
-    });
-
-    const payload = await response.json();
-
-    if (!response.ok) {
-      throw new Error(payload.error || "Dependency scan failed.");
-    }
-
-    setDependencyScan(payload as DependencyResult);
-  } catch (err) {
-    setDependencyError(
-      err instanceof Error ? err.message : "Dependency scan failed.",
-    );
-  } finally {
-    setDependencyLoading(false);
-  }
-}
-
 async function scanSecrets() {
   setSecretLoading(true);
   setSecretError("");
@@ -272,7 +192,11 @@ async function scanSecrets() {
     const payload = await response.json();
 
     if (!response.ok) {
-      throw new Error(payload.error || "Secret scan failed.");
+      throw new Error(
+        payload.status === "timed_out"
+          ? `${payload.error || "The resource request timed out."} The root page was not scanned; try again later.`
+          : payload.error || "Secret scan failed.",
+      );
     }
 
     setSecretScan(payload as SecretScanResult);
@@ -289,6 +213,18 @@ async function scanSecrets() {
   const findings = audit?.findings ?? [];
   const score = scoreAudit(findings);
   const ruleFindings = uniqueRuleFindings(findings);
+  const coverage = audit
+    ? calculateScanCoverage({
+        pagesScanned: audit.pagesScanned,
+        pagesFailed: audit.pagesFailed,
+        pagesOmitted: audit.pagesOmitted,
+        pageLimit: audit.pageLimit,
+      })
+    : null;
+  const siteSecurityLevel = audit ? securityLevel(score) : null;
+  const comparison = previousAudit && audit
+    ? compareAuditFindings(previousAudit.finalUrl, audit.finalUrl, previousAudit.findings, findings)
+    : null;
   const failed = ruleFindings.filter((f) => f.status === "fail");
   const passed = ruleFindings.filter((f) => f.status === "pass");
   const notApplicable = ruleFindings.filter(
@@ -349,9 +285,9 @@ async function scanSecrets() {
     <main className="vg-app">
       <aside className="vg-sidebar">
         <div className="vg-brand">
-          <div className="vg-logo">V</div>
+          <div className="vg-logo">Q</div>
           <div>
-            <strong>VIBE GUARD</strong>
+            <strong>QUALYS</strong>
             <span>SECURITY WORKSPACE</span>
           </div>
         </div>
@@ -360,7 +296,6 @@ async function scanSecrets() {
         <a className="vg-nav active" href="#overview">▦ Overview</a>
         <a className="vg-nav" href="#findings">⌕ Findings</a>
         <a className="vg-nav" href="#fixes">✳ Priority fixes</a>
-        <a className="vg-nav" href="#dependencies">⬡ Dependencies</a>
         <a className="vg-nav" href="#secrets">🔐 Secrets</a>
         <a className="vg-nav" href="#history">◷ Scan history</a>
 
@@ -376,7 +311,7 @@ async function scanSecrets() {
       <section className="vg-main">
         <header className="vg-topbar">
           <div>
-            <div className="vg-eyebrow">TEAM KAIRA / SECURITY CENTER</div>
+            <div className="vg-eyebrow">QUALYS / SECURITY CENTER</div>
             <h1>Security overview</h1>
             <p>Find configuration risks before they reach production.</p>
           </div>
@@ -402,7 +337,7 @@ async function scanSecrets() {
                 required
               />
               <button type="submit" disabled={loading}>
-                {loading ? "Scanning…" : "↗ Run scan"}
+                {loading ? "Scanning…" : "↗ Scan Website"}
               </button>
             </div>
           </form>
@@ -450,7 +385,7 @@ async function scanSecrets() {
                   </div>
                   <div className="vg-grade">CHECK GRADE {grade(score)}</div>
                   <p>Weighted only from observed applicable checks. This is not an overall security rating.</p>
-                  <div className="vg-grade-scale">A: 90+ · B: 80+ · C: 70+ · D: 60+ · F: below 60</div>
+                  <div className="vg-grade-scale">Security level: {siteSecurityLevel?.label ?? "Not available"}</div>
                 </article>
 
                 <article className="vg-card vg-gate-card">
@@ -474,130 +409,17 @@ async function scanSecrets() {
                   <div className="vg-stat"><span className="vg-status-dot na" /> Not applicable <strong>{notApplicable.length}</strong></div>
                   <div className="vg-stat"><span className="vg-status-dot info" /> Total checks <strong>{ruleFindings.length}</strong></div>
                   <div className="vg-stat"><span className="vg-status-dot info" /> Pages scanned <strong>{audit.pagesScanned}</strong></div>
+                  <div className="vg-stat"><span className="vg-status-dot info" /> Security level <strong>{siteSecurityLevel?.label ?? "Unrated"}</strong></div>
+                </article>
+                <article className="vg-card">
+                  <div className="vg-card-label">SCAN COVERAGE</div>
+                  <h2>{coverage?.percentage ?? 0}%</h2>
+                  <p>{coverage?.label ?? "Not available"} · {coverage?.details ?? "No page scan data."}</p>
+                  <p>Coverage is the portion of discovered pages scanned; scan limits and failed pages are shown separately.</p>
                 </article>
               </div>
             </section>
             
-<section id="dependencies" className="vg-section">
-  <div className="vg-section-heading">
-    <div>
-      <div className="vg-eyebrow">DEPENDENCY SECURITY</div>
-      <h2>Vulnerable packages</h2>
-      <p>Check production dependencies for known vulnerabilities.</p>
-    </div>
-
-    <button
-      className="vg-secondary-button"
-      onClick={scanDependencies}
-      disabled={dependencyLoading}
-    >
-      {dependencyLoading ? "Scanning..." : "Scan dependencies"}
-    </button>
-  </div>
-
-  {dependencyError && (
-    <p className="vg-error" role="alert">{dependencyError}</p>
-  )}
-
-  {dependencyScan && (
-    <>
-      <div className="vg-overview-grid">
-        <article className="vg-card">
-          <div className="vg-card-label">VULNERABILITIES FOUND</div>
-          <h2>{dependencyScan.summary.total}</h2>
-          <p>Known production dependency vulnerabilities.</p>
-        </article>
-
-        <article className="vg-card">
-          <div className="vg-card-label">CRITICAL / HIGH</div>
-          <h2>
-            {dependencyScan.summary.critical +
-              dependencyScan.summary.high}
-          </h2>
-          <p>Issues requiring priority review.</p>
-        </article>
-
-        <article className="vg-card">
-          <div className="vg-card-label">SCAN STATUS</div>
-          <h2>
-            {dependencyScan.summary.total === 0
-              ? "No issues found"
-              : "Review required"}
-          </h2>
-          <p>
-            Scanned{" "}
-            {new Date(dependencyScan.scannedAt).toLocaleString()}
-          </p>
-        </article>
-      </div>
-
-      <div className="vg-priority-list">
-        {dependencyScan.findings.length === 0 ? (
-          <p className="vg-success-message">
-            No known production dependency vulnerabilities were reported.
-          </p>
-        ) : (
-          dependencyScan.findings.map((finding) => (
-            <article
-              className="vg-priority-item"
-              key={finding.package}
-            >
-              <div className="vg-priority-content">
-                <strong>{finding.package}</strong>
-
-                <p>
-                  Severity: {finding.severity} · Affected range:{" "}
-                  {finding.affectedRange || "Not specified"}
-                </p>
-
-                <p>
-                  {finding.fixAvailable
-                    ? finding.fix?.version
-                      ? `Fix available: ${finding.fix.name || finding.package}@${finding.fix.version}${finding.fix.isSemVerMajor ? " (major update)" : ""}.`
-                      : "A fix may be available. Review before updating."
-                    : "No automatic fix is indicated by the audit result."}
-                </p>
-
-                {finding.advisory.map((item, index) => (
-                  <p key={`${finding.package}-${index}`}>
-                    {item.title || "Security advisory"}
-                    {item.url && (
-                      <>
-                        {" — "}
-                        <a
-                          href={item.url}
-                          target="_blank"
-                          rel="noreferrer"
-                        >
-                          View advisory
-                        </a>
-                      </>
-                    )}
-                  </p>
-                ))}
-              </div>
-
-              <span
-                className={`vg-severity ${
-                  ["critical", "high"].includes(
-                    finding.severity.toLowerCase()
-                  )
-                    ? "high"
-                    : finding.severity.toLowerCase() === "moderate"
-                      ? "medium"
-                      : "low"
-                }`}
-              >
-                {finding.severity}
-              </span>
-            </article>
-          ))
-        )}
-      </div>
-    </>
-  )}
-</section>
-
             <section id="fixes" className="vg-section">
               <div className="vg-section-heading">
                 <div>
@@ -680,17 +502,19 @@ async function scanSecrets() {
                 </div>
               </div>
               <div className="vg-card vg-comparison">
-                {previousAudit ? (
+                {previousAudit && comparison ? (
                   <>
                     <div><span>Previous score</span><strong>{scoreAudit(previousAudit.findings)}/100</strong><small>{previousAudit.target}</small></div>
                     <div><span>Latest score</span><strong>{score}/100</strong><small>{audit.target}</small></div>
                     <div><span>Score change</span><strong className={score >= scoreAudit(previousAudit.findings) ? "vg-positive" : "vg-negative"}>{score - scoreAudit(previousAudit.findings) > 0 ? "+" : ""}{score - scoreAudit(previousAudit.findings)}</strong><small>Points</small></div>
                   </>
+                ) : previousAudit ? (
+                  <p>Comparison is unavailable because these scans are for different websites. Scan the same website before and after the change.</p>
                 ) : (
                   <p>Run another scan in this session to compare it with this result. Previous scans are not stored permanently yet.</p>
                 )}
               </div>
-              {previousAudit && (
+              {previousAudit && comparison && (
                 <div className="vg-card vg-history-bars">
                   <div className="vg-card-label">SCORE COMPARISON</div>
                   {[{ label: "Previous", value: scoreAudit(previousAudit.findings) }, { label: "Latest", value: score }].map((item) => (
@@ -699,6 +523,15 @@ async function scanSecrets() {
                       <div className="vg-bar-track"><div className="vg-bar-fill" style={{ width: `${item.value}%` }} /></div>
                       <strong>{item.value}</strong>
                     </div>
+                  ))}
+                  <div className="vg-card-label">CHECK CHANGES ON THE SAME WEBSITE</div>
+                  <p>{comparison.resolved.length} resolved · {comparison.persisting.length} still failing · {comparison.newFindings.length} newly failing</p>
+                  {[...comparison.resolved.map((item) => ({ ...item, change: "Resolved" })),
+                    ...comparison.persisting.map((item) => ({ ...item, change: "Still failing" })),
+                    ...comparison.newFindings.map((item) => ({ ...item, change: "New failure" }))].map((item) => (
+                    <p key={`${item.change}:${item.id}:${item.pageUrl}`}>
+                      {item.change}: {item.title} ({new URL(item.pageUrl).pathname})
+                    </p>
                   ))}
                 </div>
               )}
@@ -716,8 +549,11 @@ async function scanSecrets() {
                 {[
                   ["01", "Live pages scanned", `${audit.pagesScanned} page(s) scanned; ${audit.pagesFailed} failed; ${audit.pagesOmitted} omitted by scan limits.`, true],
                   ["02", "Observed checks evaluated", `${findings.length} page-level results across ${ruleFindings.length} distinct checks.`, true],
-                  ["03", "Automated remediation", "Not performed by this passive scanner.", false],
-                  ["04", "Exploit verification", "Not performed; active testing is outside this scan.", false],
+                  ["03", "Security level", `${siteSecurityLevel?.label ?? "Unrated"} (score ${score}/100)`, true],
+                  ["04", "Coverage for this run", `${coverage?.label ?? "Unknown"} (${coverage?.percentage ?? 0}%)`, true],
+                  ["05", "Accuracy validation", "Measured only by labeled regression tests; not a real-world detection accuracy claim.", false],
+                  ["06", "Automated remediation", "Not performed by this passive scanner.", false],
+                  ["07", "Exploit verification", "Not performed; active testing is outside this scan.", false],
                 ].map(([number, title, description, complete]) => (
                   <div className="vg-timeline-step" key={String(number)}>
                     <span className={`vg-timeline-number ${complete ? "complete" : ""}`}>{complete ? "✓" : number}</span>
@@ -726,7 +562,7 @@ async function scanSecrets() {
                   </div>
                 ))}
               </div>
-              <p className="vg-footnote">Results are limited to actual public HTTP responses received in this run and the checks listed above. They do not cover authenticated pages, backend source, or all vulnerability classes.</p>
+              <p className="vg-footnote">Security score reflects weighted observed check results; coverage separately reflects pages scanned, failed, and omitted. Accuracy is tested against labeled regression fixtures only; no real-world accuracy percentage is asserted. Results do not cover authenticated pages, backend source, or all vulnerability classes.</p>
             </section>
           </>
         )}
@@ -780,7 +616,7 @@ async function scanSecrets() {
               <p className={secretScan.complete ? "vg-success-message" : "vg-error"} role={secretScan.complete ? undefined : "alert"}>
                 {secretScan.complete
                   ? `All discovered same-origin resources within the scan limits were checked.${secretScan.resourcesExternal > 0 ? ` ${secretScan.resourcesExternal} external script(s) were excluded and not fetched.` : ""}`
-                  : `Scan incomplete: ${secretScan.resourcesFailed} resource(s) failed, ${secretScan.resourcesSkipped} were skipped, and ${secretScan.resourcesOmitted} were omitted by scan limits. ${secretScan.pagesFailed} HTML page(s) failed. Review resource statuses and reasons below.`}
+                  : `${secretScan.status === "timed_out" ? "Scan timed out. " : "Scan incomplete. "}${secretScan.resourcesFailed} resource(s) failed, ${secretScan.resourcesSkipped} were skipped, and ${secretScan.resourcesOmitted} were omitted by scan limits. ${secretScan.pagesFailed} HTML page(s) failed. Review resource statuses and reasons below.`}
               </p>
               <div className="vg-priority-list">
                 {secretScan.findings.length === 0 ? (
@@ -830,7 +666,7 @@ async function scanSecrets() {
           )}
         </section>
 
-        <footer className="vg-footer">VIBE GUARD · TEAM KAIRA · SECURITY WITH CLARITY</footer>
+        <footer className="vg-footer">QUALYS · SECURITY WITH CLARITY</footer>
       </section>
     </main>
   );
